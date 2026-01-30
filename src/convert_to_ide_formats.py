@@ -17,8 +17,9 @@ from collections import defaultdict
 
 from converter import RuleConverter
 from formats import CursorFormat, WindsurfFormat, CopilotFormat, ClaudeCodeFormat
-from utils import get_version_from_pyproject
+from utils import get_version_from_pyproject, parse_frontmatter_and_content
 from validate_versions import set_plugin_version, set_marketplace_version
+from tag_mappings import KNOWN_TAGS
 
 # Project root is always one level up from src/
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -34,6 +35,92 @@ def sync_plugin_metadata(version: str) -> None:
     set_plugin_version(version, PROJECT_ROOT)
     set_marketplace_version(version, PROJECT_ROOT)
     print(f"✅ Synced plugin metadata to {version}")
+
+
+def check_and_add_unknown_tags(source_paths: list[Path]) -> bool:
+    """
+    Scan all rule files for unknown tags and prompt user to add them.
+    
+    Args:
+        source_paths: List of source directories to scan
+    
+    Returns:
+        True if all tags are valid or user added them, False if user aborted
+    """
+    unknown_tags = set()
+    files_scanned = 0
+    
+    # Scan all markdown files for tags
+    for source_path in source_paths:
+        # Resolve relative paths against PROJECT_ROOT
+        if not source_path.is_absolute():
+            source_path = PROJECT_ROOT / source_path
+        
+        if not source_path.exists():
+            print(f"⚠️  Source path not found for tag scan: {source_path}")
+            continue
+            
+        for md_file in source_path.rglob("*.md"):
+            if md_file.name.endswith(".template"):
+                continue
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                frontmatter, _ = parse_frontmatter_and_content(content)
+                if frontmatter and "tags" in frontmatter:
+                    tags = frontmatter["tags"]
+                    if isinstance(tags, list):
+                        for tag in tags:
+                            if isinstance(tag, str) and tag.lower() not in KNOWN_TAGS:
+                                unknown_tags.add(tag.lower())
+            except Exception:
+                continue
+            files_scanned += 1
+    
+    if files_scanned == 0:
+        print("⚠️  No rule files found to scan for tags")
+        return True
+    
+    if not unknown_tags:
+        return True
+    
+    # Found unknown tags - prompt user
+    print(f"\n⚠️  Found {len(unknown_tags)} unknown tag(s): {', '.join(sorted(unknown_tags))}")
+    print(f"   Known tags: {', '.join(sorted(KNOWN_TAGS))}")
+    
+    response = input("\nWould you like to add these tags to KNOWN_TAGS? [y/N]: ").strip().lower()
+    
+    if response != 'y' and response != 'yes':
+        print("❌ Aborted. Please update your rule tags or add them to tag_mappings.py manually.")
+        return False
+    
+    # Add tags to tag_mappings.py
+    tag_mappings_path = Path(__file__).parent / "tag_mappings.py"
+    content = tag_mappings_path.read_text(encoding="utf-8")
+    
+    # Find the KNOWN_TAGS set and add new tags
+    new_tags = KNOWN_TAGS | unknown_tags
+    new_tags_str = ",\n    ".join(f'"{tag}"' for tag in sorted(new_tags))
+    
+    # Replace the KNOWN_TAGS definition
+    # Use [^}]* (zero or more) instead of [^}]+ to handle empty KNOWN_TAGS = {}
+    new_content = re.sub(
+        r'KNOWN_TAGS = \{[^}]*\}',
+        f'KNOWN_TAGS = {{\n    {new_tags_str},\n}}',
+        content
+    )
+    
+    # Verify the substitution actually happened
+    if new_content == content:
+        print("❌ Failed to update tag_mappings.py - KNOWN_TAGS pattern not found")
+        return False
+    
+    tag_mappings_path.write_text(new_content, encoding="utf-8")
+    print(f"✅ Added {len(unknown_tags)} tag(s) to tag_mappings.py: {', '.join(sorted(unknown_tags))}")
+    
+    # Update the in-memory KNOWN_TAGS
+    KNOWN_TAGS.update(unknown_tags)
+    
+    return True
 
 
 def matches_tag_filter(rule_tags: list[str], filter_tags: list[str]) -> bool:
@@ -98,6 +185,50 @@ def update_skill_md(language_to_rules: dict[str, list[str]], skill_path: str) ->
     print(f"Updated SKILL.md with language mappings")
 
 
+def update_tag_mappings(tag_to_rules: dict[str, list[str]], skill_path: str) -> None:
+    """
+    Update SKILL.md with tag-to-rules mapping table.
+
+    Args:
+        tag_to_rules: Dictionary mapping tags to rule files
+        skill_path: Path to SKILL.md file
+    """
+    # Generate markdown table
+    table_lines = [
+        "| Security Context (Tag) | Rules to Apply |",
+        "|------------------------|----------------|",
+    ]
+
+    for tag in sorted(tag_to_rules.keys()):
+        rules = sorted(tag_to_rules[tag])
+        rules_str = ", ".join(rules)
+        table_lines.append(f"| {tag} | {rules_str} |")
+
+    table = "\n".join(table_lines)
+
+    # Markers for the tag mappings section
+    start_marker = "<!-- TAG_MAPPINGS_START -->"
+    end_marker = "<!-- TAG_MAPPINGS_END -->"
+
+    # Read SKILL.md
+    skill_file = Path(skill_path)
+    content = skill_file.read_text(encoding="utf-8")
+
+    if start_marker not in content or end_marker not in content:
+        print("Warning: Tag mappings section not found in SKILL.md, skipping tag table")
+        return
+
+    # Replace entire section including markers with just the table
+    start_idx = content.index(start_marker)
+    end_idx = content.index(end_marker) + len(end_marker)
+    new_section = f"\n\n{table}\n\n"
+    updated_content = content[:start_idx] + new_section + content[end_idx:]
+
+    # Write back to SKILL.md
+    skill_file.write_text(updated_content, encoding="utf-8")
+    print(f"Updated SKILL.md with tag mappings")
+
+
 def convert_rules(input_path: str, output_dir: str = "dist", include_claudecode: bool = True, version: str = None, filter_tags: list[str] = None) -> dict[str, list[str]]:
     """
     Convert rule file(s) to all supported IDE formats using RuleConverter.
@@ -158,6 +289,7 @@ def convert_rules(input_path: str, output_dir: str = "dist", include_claudecode:
 
     results = {"success": [], "errors": [], "skipped": []}
     language_to_rules = defaultdict(list)
+    tag_to_rules = defaultdict(list)
 
     # Process each file
     for md_file in md_files:
@@ -198,6 +330,10 @@ def convert_rules(input_path: str, output_dir: str = "dist", include_claudecode:
             # Update language mappings for SKILL.md
             for language in result.languages:
                 language_to_rules[language].append(result.filename)
+
+            # Update tag mappings for SKILL.md
+            for tag in result.tags:
+                tag_to_rules[tag].append(result.filename)
 
         except FileNotFoundError as e:
             error_msg = f"{md_file.name}: File not found - {e}"
@@ -249,6 +385,10 @@ def convert_rules(input_path: str, output_dir: str = "dist", include_claudecode:
         output_skill_path.write_text(template_content, encoding="utf-8")
         
         update_skill_md(language_to_rules, str(output_skill_path))
+        
+        # Update tag mappings if any tags were collected
+        if tag_to_rules:
+            update_tag_mappings(tag_to_rules, str(output_skill_path))
 
     return results
 
@@ -314,6 +454,10 @@ if __name__ == "__main__":
                 print(f"   - {filename} in: {', '.join(sources)}")
             print("\nPlease rename files to have unique names across all sources.")
             sys.exit(1)
+    
+    # Check for unknown tags and prompt user
+    if not check_and_add_unknown_tags(source_paths):
+        sys.exit(1)
     
     # Get version once and sync to metadata files
     version = get_version_from_pyproject()
