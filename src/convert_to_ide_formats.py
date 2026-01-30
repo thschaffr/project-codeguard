@@ -98,6 +98,81 @@ def update_skill_md(language_to_rules: dict[str, list[str]], skill_path: str) ->
     print(f"Updated SKILL.md with language mappings")
 
 
+def update_claude_cache(version: str) -> bool:
+    """
+    Update the Claude Code plugin cache with generated rules.
+    
+    Copies rules from skills/software-security/ to the Claude cache directory.
+    Completely replaces existing cache contents to ensure clean state.
+    
+    This enables immediate use of custom or modified rules in Claude Code
+    without waiting for marketplace updates.
+    
+    Args:
+        version: Version string from pyproject.toml (e.g., "1.0.1")
+    
+    Returns:
+        True if successful, False otherwise
+    
+    Raises:
+        May print error messages for permission issues or invalid paths.
+    """
+    # Validate version to prevent path traversal
+    if not re.match(r'^[a-zA-Z0-9._-]+$', version):
+        print(f"❌ Invalid version format: {version}")
+        return False
+    
+    source_dir = PROJECT_ROOT / "skills" / "software-security"
+    # Cache path: ~/.claude/plugins/cache/project-codeguard/codeguard-security/{version}/skills/software-security
+    cache_base = (
+        Path.home() / ".claude" / "plugins" / "cache" 
+        / "project-codeguard" / "codeguard-security" / version
+    )
+    cache_dir = cache_base / "skills" / "software-security"
+    
+    if not source_dir.exists():
+        print(f"❌ Source directory not found: {source_dir}")
+        return False
+    
+    # Completely remove existing version cache directory to ensure clean replacement
+    try:
+        if cache_base.exists():
+            shutil.rmtree(cache_base)
+            print(f"🗑️  Cleared existing cache: {cache_base}")
+    except OSError as e:
+        print(f"❌ Failed to clear existing cache: {e}")
+        return False
+    
+    # Create parent directories and copy
+    try:
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_dir, cache_dir)
+    except (OSError, shutil.Error) as e:
+        print(f"❌ Failed to copy to cache: {e}")
+        return False
+    
+    print(f"✅ Updated cache: {cache_dir}")
+    
+    # Verify and list what was copied
+    rules_dir = cache_dir / "rules"
+    if not rules_dir.exists():
+        print(f"⚠️  Warning: rules directory not found after copy")
+        return False
+    
+    rule_count = len(list(rules_dir.glob("*.md")))
+    if rule_count == 0:
+        print(f"⚠️  Warning: no rules found in cache")
+        return False
+    
+    print(f"   → {rule_count} rules copied")
+    
+    skill_file = cache_dir / "SKILL.md"
+    if skill_file.exists():
+        print(f"   → SKILL.md copied")
+    
+    return True
+
+
 def convert_rules(input_path: str, output_dir: str = "dist", include_claudecode: bool = True, version: str = None, filter_tags: list[str] = None) -> dict[str, list[str]]:
     """
     Convert rule file(s) to all supported IDE formats using RuleConverter.
@@ -290,6 +365,11 @@ if __name__ == "__main__":
         dest="tags",
         help="Filter rules by tags (comma-separated, case-insensitive, AND logic). Example: --tag api,web-security",
     )
+    parser.add_argument(
+        "--update-cache",
+        action="store_true",
+        help="Update the Claude Code plugin cache with generated rules for immediate use.",
+    )
     
     cli_args = parser.parse_args()
     source_paths = _resolve_source_paths(cli_args)
@@ -383,3 +463,10 @@ if __name__ == "__main__":
         sys.exit(1)
     
     print("✅ All conversions successful")
+    
+    # Update Claude Code plugin cache if requested
+    if cli_args.update_cache:
+        print("\nUpdating Claude Code plugin cache...")
+        if not update_claude_cache(version):
+            print("❌ Failed to update cache")
+            sys.exit(1)
