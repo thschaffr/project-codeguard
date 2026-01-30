@@ -102,11 +102,17 @@ def check_and_add_unknown_tags(source_paths: list[Path]) -> bool:
     new_tags_str = ",\n    ".join(f'"{tag}"' for tag in sorted(new_tags))
     
     # Replace the KNOWN_TAGS definition
+    # Use [^}]* (zero or more) instead of [^}]+ to handle empty KNOWN_TAGS = {}
     new_content = re.sub(
-        r'KNOWN_TAGS = \{[^}]+\}',
+        r'KNOWN_TAGS = \{[^}]*\}',
         f'KNOWN_TAGS = {{\n    {new_tags_str},\n}}',
         content
     )
+    
+    # Verify the substitution actually happened
+    if new_content == content:
+        print("❌ Failed to update tag_mappings.py - KNOWN_TAGS pattern not found")
+        return False
     
     tag_mappings_path.write_text(new_content, encoding="utf-8")
     print(f"✅ Added {len(unknown_tags)} tag(s) to tag_mappings.py: {', '.join(sorted(unknown_tags))}")
